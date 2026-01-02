@@ -2,96 +2,97 @@ const GROUP_TITLE = "▶ Active";
 const GROUP_COLOR = "green";
 let isProcessing = false;
 
-async function manageTabs(activeTabId, forceFocus = false) {
+const autoLikeScript = () => {
+    const likeBtnSelector = 'button[aria-label*="нравится"], button[aria-label*="like this video"]';
+    const likeButton = document.querySelector(likeBtnSelector);
+    if (likeButton && likeButton.getAttribute('aria-pressed') === 'false') {
+        likeButton.click();
+        console.log("Smart Mover: Auto-liked!");
+    }
+};
+
+async function manageTabs(tabId) {
     if (isProcessing) return;
     isProcessing = true;
 
     try {
-        const tab = await chrome.tabs.get(activeTabId);
-        
-        // Проверяем, что это YouTube (watch страница)
+        const tab = await chrome.tabs.get(tabId);
         if (!tab || !tab.url || !tab.url.includes("youtube.com/watch")) {
             isProcessing = false;
             return;
         }
 
-        // 1. Ищем существующую группу
         const groups = await chrome.tabGroups.query({ title: GROUP_TITLE, windowId: tab.windowId });
         let targetGroupId = groups.length > 0 ? groups[0].id : null;
 
-        // 2. Двигаем вкладку в самый конец (индекс -1)
-        await chrome.tabs.move(activeTabId, { index: -1 });
+        // Перемещаем в конец
+        await chrome.tabs.move(tabId, { index: -1 });
+        targetGroupId = await chrome.tabs.group({ tabIds: tabId, groupId: targetGroupId || undefined });
 
-        // 3. Группируем
-        targetGroupId = await chrome.tabs.group({ 
-            tabIds: activeTabId, 
-            groupId: targetGroupId || undefined 
-        });
-
-        // 4. Оформляем группу
-        await new Promise(r => setTimeout(r, 60)); // Небольшая пауза для стабильности UI
+        // Оформляем группу
+        await new Promise(r => setTimeout(r, 100)); // Увеличенная пауза для стабильности
         await chrome.tabGroups.update(targetGroupId, { 
             title: GROUP_TITLE, 
             color: GROUP_COLOR, 
             collapsed: false 
         });
-        
-        // Двигаем группу в конец
         await chrome.tabGroups.move(targetGroupId, { index: -1 });
 
-        // 5. Управление плеером: включаем текущее, выключаем остальные
-        const tabsInGroup = await chrome.tabs.query({ groupId: targetGroupId });
-        for (const t of tabsInGroup) {
-            const shouldPlay = (t.id === activeTabId);
+        // Управление воспроизведением и фокусом
+        if (tab.active) {
+            // Если вкладка активна - включаем звук и переключаем фокус
+            await chrome.tabs.update(tabId, { active: true }); 
+            
+            const tabsInGroup = await chrome.tabs.query({ groupId: targetGroupId });
+            for (const t of tabsInGroup) {
+                const isCurrent = (t.id === tabId);
+                chrome.scripting.executeScript({
+                    target: { tabId: t.id },
+                    func: (shouldPlay, likeCodeStr) => {
+                        const video = document.querySelector('video');
+                        if (video) {
+                            if (shouldPlay) {
+                                video.play().catch(() => {});
+                                try { new Function(`(${likeCodeStr})()`)(); } catch(e){}
+                            } else {
+                                video.pause();
+                            }
+                        }
+                    },
+                    args: [isCurrent, autoLikeScript.toString()]
+                }).catch(() => {});
+            }
+        } else {
+            // Если вкладка фоновая - принудительная пауза
             chrome.scripting.executeScript({
-                target: { tabId: t.id },
-                func: (playMode) => {
-                    const video = document.querySelector('video');
-                    if (video) {
-                        if (playMode) video.play().catch(() => {});
-                        else video.pause();
-                    }
-                },
-                args: [shouldPlay]
+                target: { tabId: tabId },
+                func: () => {
+                    const v = document.querySelector('video');
+                    if (v) v.pause();
+                }
             }).catch(() => {});
         }
-
-        // 6. ПЕРЕКЛЮЧЕНИЕ ФОКУСА: делаем вкладку активной
-        await chrome.tabs.update(activeTabId, { active: true });
-
     } catch (e) {
-        console.error("Critical Error:", e);
+        console.error(e);
     } finally {
         setTimeout(() => { isProcessing = false; }, 300);
     }
 }
 
-// Клик по группе: разворачивание и переключение на видео
+// Слушатель клика по самой группе
 chrome.tabGroups.onUpdated.addListener(async (group) => {
     if (group.title === GROUP_TITLE && group.collapsed) {
-        try {
-            await chrome.tabGroups.update(group.id, { collapsed: false });
-            const tabs = await chrome.tabs.query({ groupId: group.id });
-            if (tabs.length > 0) {
-                // Всегда переключаемся на самую последнюю (актуальную) вкладку в группе
-                const lastTabId = tabs[tabs.length - 1].id;
-                await chrome.tabs.update(lastTabId, { active: true });
-            }
-        } catch (e) { console.error(e); }
+        await chrome.tabGroups.update(group.id, { collapsed: false });
+        const tabs = await chrome.tabs.query({ groupId: group.id });
+        if (tabs.length > 0) {
+            await chrome.tabs.update(tabs[tabs.length - 1].id, { active: true });
+        }
     }
 });
 
-// Событие 1: Клик по вкладке вручную
-chrome.tabs.onActivated.addListener((info) => {
-    manageTabs(info.tabId);
-});
-
-// Событие 2: Изменение состояния вкладки (звук, URL, загрузка)
+chrome.tabs.onActivated.addListener((info) => manageTabs(info.tabId));
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    // Триггер 1: Видео начало издавать звук (даже в фоне)
-    // Триггер 2: Вкладка догрузилась (статус complete)
-    // Триггер 3: Изменился URL (переход на следующее видео в том же окне)
-    if (changeInfo.audible === true || changeInfo.status === 'complete' || changeInfo.url) {
+    if (changeInfo.status === 'complete' || changeInfo.url || changeInfo.audible) {
         manageTabs(tabId);
     }
 });
