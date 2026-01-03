@@ -2,14 +2,41 @@ const GROUP_TITLE = "▶ Active";
 const GROUP_COLOR = "green";
 let isProcessing = false;
 
-const autoLikeScript = () => {
-    const likeBtnSelector = 'button[aria-label*="нравится"], button[aria-label*="like this video"]';
-    const likeButton = document.querySelector(likeBtnSelector);
-    if (likeButton && likeButton.getAttribute('aria-pressed') === 'false') {
-        likeButton.click();
-        console.log("Smart Mover: Auto-liked!");
-    }
-};
+// МАКСИМАЛЬНО НАДЕЖНЫЙ СКРИПТ ЛАЙКА
+function startSimpleTimer() {
+    if (window.ytTimerRunning) return;
+    window.ytTimerRunning = true;
+
+    let secondsInFocus = 0;
+    console.log("Smart Mover: Таймер фокуса запущен...");
+
+    const interval = setInterval(() => {
+        // Считаем время только когда пользователь смотрит на вкладку
+        if (document.hasFocus()) {
+            secondsInFocus++;
+        }
+
+        const video = document.querySelector('video');
+        if (!video || !video.duration) return;
+
+        // Условие: 1 минута для видео < 5 мин, иначе 5 минут
+        const threshold = video.duration < 300 ? 60 : 300;
+
+        if (secondsInFocus >= threshold) {
+            // Ищем кнопку лайка по всем возможным признакам
+            const btn = document.querySelector('button[aria-label*="нравится"], button[aria-label*="like this video"]');
+            
+            if (btn) {
+                if (btn.getAttribute('aria-pressed') === 'false') {
+                    btn.click();
+                    console.log("Smart Mover: Условие выполнено, лайк поставлен!");
+                }
+                clearInterval(interval);
+                window.ytTimerRunning = false;
+            }
+        }
+    }, 1000);
+}
 
 async function manageTabs(tabId) {
     if (isProcessing) return;
@@ -25,45 +52,38 @@ async function manageTabs(tabId) {
         const groups = await chrome.tabGroups.query({ title: GROUP_TITLE, windowId: tab.windowId });
         let targetGroupId = groups.length > 0 ? groups[0].id : null;
 
-        // Перемещаем в конец
         await chrome.tabs.move(tabId, { index: -1 });
         targetGroupId = await chrome.tabs.group({ tabIds: tabId, groupId: targetGroupId || undefined });
 
-        // Оформляем группу
-        await new Promise(r => setTimeout(r, 100)); // Увеличенная пауза для стабильности
-        await chrome.tabGroups.update(targetGroupId, { 
-            title: GROUP_TITLE, 
-            color: GROUP_COLOR, 
-            collapsed: false 
-        });
+        await new Promise(r => setTimeout(r, 150)); 
+        await chrome.tabGroups.update(targetGroupId, { title: GROUP_TITLE, color: GROUP_COLOR, collapsed: false });
         await chrome.tabGroups.move(targetGroupId, { index: -1 });
 
-        // Управление воспроизведением и фокусом
         if (tab.active) {
-            // Если вкладка активна - включаем звук и переключаем фокус
-            await chrome.tabs.update(tabId, { active: true }); 
-            
             const tabsInGroup = await chrome.tabs.query({ groupId: targetGroupId });
             for (const t of tabsInGroup) {
                 const isCurrent = (t.id === tabId);
                 chrome.scripting.executeScript({
                     target: { tabId: t.id },
-                    func: (shouldPlay, likeCodeStr) => {
+                    func: (shouldPlay, timerFuncSource) => {
                         const video = document.querySelector('video');
                         if (video) {
                             if (shouldPlay) {
                                 video.play().catch(() => {});
-                                try { new Function(`(${likeCodeStr})()`)(); } catch(e){}
+                                // Внедряем функцию таймера как строку и запускаем
+                                if (!window.ytTimerRunning) {
+                                    eval(timerFuncSource);
+                                    startSimpleTimer();
+                                }
                             } else {
                                 video.pause();
                             }
                         }
                     },
-                    args: [isCurrent, autoLikeScript.toString()]
+                    args: [isCurrent, startSimpleTimer.toString()]
                 }).catch(() => {});
             }
         } else {
-            // Если вкладка фоновая - принудительная пауза
             chrome.scripting.executeScript({
                 target: { tabId: tabId },
                 func: () => {
@@ -79,7 +99,7 @@ async function manageTabs(tabId) {
     }
 }
 
-// Слушатель клика по самой группе
+// Защита от сворачивания группы
 chrome.tabGroups.onUpdated.addListener(async (group) => {
     if (group.title === GROUP_TITLE && group.collapsed) {
         await chrome.tabGroups.update(group.id, { collapsed: false });
