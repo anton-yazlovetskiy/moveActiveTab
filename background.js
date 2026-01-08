@@ -2,6 +2,14 @@ const GROUP_TITLE = "▶ Active";
 const GROUP_COLOR = "green";
 let isProcessing = false;
 
+// 1. Слушатель сообщений от вкладок
+chrome.runtime.onMessage.addListener((message, sender) => {
+    if (message.action === "close_completed_tab" && sender.tab) {
+        console.log(`Smart Mover: Видео завершено, закрываю вкладку ${sender.tab.id}`);
+        chrome.tabs.remove(sender.tab.id);
+    }
+});
+
 // МАКСИМАЛЬНО НАДЕЖНЫЙ СКРИПТ ЛАЙКА
 function startSimpleTimer() {
     if (window.ytTimerRunning) return;
@@ -11,7 +19,6 @@ function startSimpleTimer() {
     console.log("Smart Mover: Таймер фокуса запущен...");
 
     const interval = setInterval(() => {
-        // Считаем время только когда пользователь смотрит на вкладку
         if (document.hasFocus()) {
             secondsInFocus++;
         }
@@ -19,11 +26,9 @@ function startSimpleTimer() {
         const video = document.querySelector('video');
         if (!video || !video.duration) return;
 
-        // Условие: 1 минута для видео < 5 мин, иначе 5 минут
         const threshold = video.duration < 300 ? 60 : 300;
 
         if (secondsInFocus >= threshold) {
-            // Ищем кнопку лайка по всем возможным признакам
             const btn = document.querySelector('button[aria-label*="нравится"], button[aria-label*="like this video"]');
             
             if (btn) {
@@ -68,9 +73,18 @@ async function manageTabs(tabId) {
                     func: (shouldPlay, timerFuncSource) => {
                         const video = document.querySelector('video');
                         if (video) {
+                            // --- НОВАЯ ЛОГИКА ЗАКРЫТИЯ ---
+                            if (!window.ytEndListenerAdded) {
+                                video.addEventListener('ended', () => {
+                                    chrome.runtime.sendMessage({ action: "close_completed_tab" });
+                                });
+                                window.ytEndListenerAdded = true;
+                                console.log("Smart Mover: Слушатель окончания видео добавлен");
+                            }
+                            // -----------------------------
+
                             if (shouldPlay) {
                                 video.play().catch(() => {});
-                                // Внедряем функцию таймера как строку и запускаем
                                 if (!window.ytTimerRunning) {
                                     eval(timerFuncSource);
                                     startSimpleTimer();
@@ -99,7 +113,6 @@ async function manageTabs(tabId) {
     }
 }
 
-// Защита от сворачивания группы
 chrome.tabGroups.onUpdated.addListener(async (group) => {
     if (group.title === GROUP_TITLE && group.collapsed) {
         await chrome.tabGroups.update(group.id, { collapsed: false });
